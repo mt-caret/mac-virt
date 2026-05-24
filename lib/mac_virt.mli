@@ -148,11 +148,32 @@ module Virtual_machine : sig
   type t
 
   (** Create a virtual machine from a configuration. The configuration is validated first,
-      so a [t] always originates from a valid configuration. *)
+      so a [t] always originates from a valid configuration. The machine runs on a private
+      serial queue and needs no run loop, so it can be driven headlessly. *)
   val create : Configuration.t -> t Or_error.t
 
   (** The machine's current run state. *)
   val state : t -> State.t
+
+  (** Boot the machine; blocks until it reaches the running state (not until the guest OS
+      finishes booting). The process must stay alive afterwards for the machine to keep
+      running. *)
+  val start : t -> unit Or_error.t
+
+  (** Ask the guest to shut down cleanly (a power-button request). Returns once the
+      request is delivered; the guest powers off asynchronously, after which {!state}
+      becomes [Stopped]. *)
+  val request_stop : t -> unit Or_error.t
+
+  (** Force the machine off immediately, like pulling the plug; blocks until it has
+      stopped. *)
+  val stop : t -> unit Or_error.t
+
+  (** Block until the guest stops on its own — i.e. it powers itself off (perhaps after a
+      {!request_stop}) — reported by the machine's delegate rather than by polling.
+      [timeout_seconds <= 0] waits indefinitely; otherwise [`Timed_out] is returned if the
+      guest has not stopped by then. An [Error] means the machine stopped with a failure. *)
+  val wait_for_stop : t -> timeout_seconds:int -> [ `Stopped | `Timed_out ] Or_error.t
 end
 
 (** Installs macOS into a virtual machine's storage from a restore image. *)

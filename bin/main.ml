@@ -135,13 +135,13 @@ let load_machine_identifier ~bundle =
      | None -> create_and_save ())
 ;;
 
-let boot ~bundle ~requested_cpu_count ~requested_memory_gib =
+let reconstruct_config ~bundle ~requested_cpu_count ~requested_memory_gib =
   let%bind.Or_error hardware_model = load_hardware_model ~bundle in
   let machine_identifier = load_machine_identifier ~bundle in
   let auxiliary_storage =
     Mac_virt.Auxiliary_storage.load ~path:(aux_storage_file bundle)
   in
-  let%bind.Or_error storage =
+  let%map.Or_error storage =
     Mac_virt.Storage_device.disk_image ~path:(disk_image_file bundle) ~read_only:false
   in
   let platform =
@@ -151,15 +151,61 @@ let boot ~bundle ~requested_cpu_count ~requested_memory_gib =
   let memory_size =
     Int64.of_int (Option.value requested_memory_gib ~default:8 * bytes_per_gib)
   in
-  let config =
-    Mac_virt.Configuration.create_macos
-      ~cpu_count
-      ~memory_size
-      ~platform
-      ~storage_devices:[ storage ]
+  Mac_virt.Configuration.create_macos
+    ~cpu_count
+    ~memory_size
+    ~platform
+    ~storage_devices:[ storage ]
+;;
+
+let boot ~bundle ~requested_cpu_count ~requested_memory_gib =
+  let%bind.Or_error config =
+    reconstruct_config ~bundle ~requested_cpu_count ~requested_memory_gib
   in
-  print_s [%message "booting" ~bundle (cpu_count : int) (memory_size : int64)];
+  print_s
+    [%message
+      "booting"
+        ~bundle
+        ~cpu_count:(Mac_virt.Configuration.cpu_count config : int)
+        ~memory_size:(Mac_virt.Configuration.memory_size config : int64)];
   Mac_virt.Gui.boot config ~title:"macOS"
+;;
+
+let stop_machine vm ~force =
+  let module Vm = Mac_virt.Virtual_machine in
+  match force with
+  | true -> Vm.stop vm
+  | false ->
+    let%bind.Or_error () = Vm.request_stop vm in
+    (match%bind.Or_error Vm.wait_for_stop vm ~timeout_seconds:90 with
+     | `Stopped -> Ok ()
+     | `Timed_out ->
+       print_endline "guest did not shut down in time; forcing power-off";
+       Vm.stop vm)
+;;
+
+let run ~bundle ~requested_cpu_count ~requested_memory_gib ~seconds ~force =
+  let module Vm = Mac_virt.Virtual_machine in
+  let%bind.Or_error config =
+    reconstruct_config ~bundle ~requested_cpu_count ~requested_memory_gib
+  in
+  let%bind.Or_error vm = Vm.create config in
+  let%bind.Or_error () = Vm.start vm in
+  print_s [%message "started" ~state:(Vm.state vm : Vm.State.t)];
+  let%map.Or_error () =
+    match seconds with
+    | None ->
+      print_endline "running until the guest shuts itself down...";
+      let%map.Or_error (_ : [ `Stopped | `Timed_out ]) =
+        Vm.wait_for_stop vm ~timeout_seconds:0
+      in
+      ()
+    | Some n ->
+      Core_unix.sleep n;
+      print_s [%message "ran" ~seconds:(n : int) ~state:(Vm.state vm : Vm.State.t)];
+      stop_machine vm ~force
+  in
+  print_s [%message "stopped" ~state:(Vm.state vm : Vm.State.t)]
 ;;
 
 let install_command =
@@ -203,9 +249,32 @@ let boot_command =
        | Error e -> print_s [%message "boot failed" (e : Error.t)])
 ;;
 
+let run_command =
+  Command.basic
+    ~summary:"Boot an installed VM bundle headlessly (no window), then stop it"
+    (let%map_open.Command bundle =
+       flag "bundle" (required string) ~doc:"DIR the VM bundle to boot"
+     and requested_cpu_count =
+       flag "cpu-count" (optional int) ~doc:"N virtual CPUs (default: 4)"
+     and requested_memory_gib =
+       flag "memory-gib" (optional int) ~doc:"N RAM in GiB (default: 8)"
+     and seconds =
+       flag
+         "seconds"
+         (optional int)
+         ~doc:"N stop after N seconds (default: run until the guest shuts itself down)"
+     and force =
+       flag "force" no_arg ~doc:" force power-off instead of requesting a clean shutdown"
+     in
+     fun () ->
+       match run ~bundle ~requested_cpu_count ~requested_memory_gib ~seconds ~force with
+       | Ok () -> ()
+       | Error e -> print_s [%message "run failed" (e : Error.t)])
+;;
+
 let () =
   Command_unix.run
     (Command.group
        ~summary:"Create, install, and boot macOS virtual machines"
-       [ "install", install_command; "boot", boot_command ])
+       [ "install", install_command; "boot", boot_command; "run", run_command ])
 ;;

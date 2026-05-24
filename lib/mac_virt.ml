@@ -170,8 +170,19 @@ module Virtual_machine = struct
 
   type t
 
+  (* Representation must match [vz_virtual_machine_wait_for_stop]: [Stopped_clean] is
+     [Val_int 0], [Timed_out] is [Val_int 1], [Stopped_with_error] is a block with tag 0. *)
+  type raw_stop =
+    | Stopped_clean
+    | Timed_out
+    | Stopped_with_error of string
+
   external create_unchecked : Configuration.t -> t = "vz_virtual_machine_create"
   external state_stub : t -> int = "vz_virtual_machine_state"
+  external start_stub : t -> string option = "vz_virtual_machine_start"
+  external stop_stub : t -> string option = "vz_virtual_machine_stop"
+  external request_stop_stub : t -> string option = "vz_virtual_machine_request_stop"
+  external wait_for_stop_stub : t -> int -> raw_stop = "vz_virtual_machine_wait_for_stop"
 
   let create config =
     match Configuration.validate config with
@@ -180,6 +191,22 @@ module Virtual_machine = struct
   ;;
 
   let state t = State.of_int (state_stub t)
+
+  let unit_or_error = function
+    | None -> Ok ()
+    | Some message -> Or_error.error_string message
+  ;;
+
+  let start t = unit_or_error (start_stub t)
+  let stop t = unit_or_error (stop_stub t)
+  let request_stop t = unit_or_error (request_stop_stub t)
+
+  let wait_for_stop t ~timeout_seconds =
+    match wait_for_stop_stub t timeout_seconds with
+    | Stopped_clean -> Ok `Stopped
+    | Timed_out -> Ok `Timed_out
+    | Stopped_with_error message -> Or_error.error_string message
+  ;;
 end
 
 module Installer = struct

@@ -15,6 +15,15 @@ Create, install, and boot macOS virtual machines
   . [-ipsw PATH]             . local restore image (default: download the latest
                                supported)
   . [-memory-gib N]          . RAM in GiB (default: the image minimum)
+  run                        . Boot an installed VM bundle headlessly (no
+                               window), then stop it
+  . -bundle DIR              . the VM bundle to boot
+  . [-cpu-count N]           . virtual CPUs (default: 4)
+  . [-force]                 . force power-off instead of requesting a clean
+                               shutdown
+  . [-memory-gib N]          . RAM in GiB (default: 8)
+  . [-seconds N]             . stop after N seconds (default: run until the
+                               guest shuts itself down)
   version                    . print version information
   . [-build-info]            . print build info for this build
   . [-version]               . print the version of this build

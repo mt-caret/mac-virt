@@ -116,7 +116,21 @@ method call + delegate callback happens on that queue. Two modes:
   (`initWithConfiguration:queue:`). Issue work with `dispatch_async`; read `state` with
   `dispatch_sync`. The VM runs as long as libdispatch services the queue and the process is
   alive — **no run loop required** (the install proved this: we blocked `main` on a
-  semaphore while the VM ran the installer on its private queue).
+  semaphore while the VM ran the installer on its private queue). Lifecycle is exposed as
+  `Virtual_machine.start` / `stop` (force power-off) / `request_stop` (graceful) — each
+  dispatched onto the VM's queue and bridged to a synchronous `unit Or_error.t` via a
+  semaphore, guarded by `canStart`/`canStop`/`canRequestStop` so misuse returns an error
+  instead of raising. The `run` CLI subcommand drives this headlessly; verified from the
+  shell: start → `Running`, hold, force-stop → `Stopped`. Waiting for the guest to stop is
+  **delegate-driven, not polled**: `vz_virtual_machine_create` attaches a
+  `VZVirtualMachineDelegate` (`MacVirtHeadlessDelegate`, kept alive in the `vz_vm` block)
+  that signals a semaphore on `guestDidStopVirtualMachine:` / `didStopWithError:`.
+  `Virtual_machine.wait_for_stop ~timeout_seconds` blocks on that semaphore (runtime lock
+  released), returning ``` `Stopped ``` / ``` `Timed_out ``` / an `Error`. The C stub returns
+  a 3-way OCaml value whose representation is hand-matched to a `raw_stop` variant (`Val_int 0`
+  = clean, `Val_int 1` = timed out, a tag-0 block = error). This powers the graceful stop
+  (`request_stop` then `wait_for_stop`, force-off fallback on timeout) and a `run` mode with
+  no `-seconds` that blocks until the guest powers itself off.
 
 - **GUI** (`vz_boot_gui`): AppKit requires the **main thread** running `NSApplication`, and
   `VZVirtualMachineView` wants the VM on the **main queue**. So the VM is created with
@@ -199,6 +213,8 @@ restore.ipsw            the downloaded restore image (only needed to (re)install
 ## Status
 
 M1 (install a macOS guest and boot it into an interactive window) is **done and visually
-verified**. Natural next steps: configurable display/resolution, network modes, shared
-folders, a headless `start`/`stop` with a delegate-driven state stream, and replacing the
-blocking semaphores with `Async` integration.
+verified**, as is headless `start`/`stop`/`request_stop` plus a delegate-driven
+`wait_for_stop` (the `run` subcommand, including a run-until-the-guest-shuts-down mode).
+Natural next steps: a richer **state stream** (KVO on `VZVirtualMachine.state` for every
+transition, not just stop), configurable display/resolution, network modes, shared folders,
+and replacing the blocking semaphores with `Async` integration.

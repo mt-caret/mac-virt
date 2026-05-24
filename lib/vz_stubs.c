@@ -51,6 +51,7 @@ static id vz_unwrap(value v) { return (__bridge id)(*((void **)Data_custom_val(v
 typedef struct {
   void *vm;
   void *queue;
+  void *delegate;
 } vz_vm;
 
 static void vz_vm_finalize(value v)
@@ -58,6 +59,7 @@ static void vz_vm_finalize(value v)
   vz_vm *p = Data_custom_val(v);
   if (p->vm != NULL) CFBridgingRelease(p->vm);
   if (p->queue != NULL) CFBridgingRelease(p->queue);
+  if (p->delegate != NULL) CFBridgingRelease(p->delegate);
 }
 
 static struct custom_operations vz_vm_ops = {
@@ -70,6 +72,35 @@ static struct custom_operations vz_vm_ops = {
   custom_compare_ext_default,
   custom_fixed_length_default,
 };
+
+/* Delegate for headless machines: records why the guest stopped and signals a
+   semaphore once it has, so a caller can block until then instead of polling. */
+@interface MacVirtHeadlessDelegate : NSObject <VZVirtualMachineDelegate>
+@property (nonatomic, strong) dispatch_semaphore_t stopped;
+@property (nonatomic, strong) NSError *stopError;
+@end
+
+@implementation MacVirtHeadlessDelegate
+- (instancetype)init
+{
+  self = [super init];
+  if (self != nil) _stopped = dispatch_semaphore_create(0);
+  return self;
+}
+
+- (void)guestDidStopVirtualMachine:(VZVirtualMachine *)virtualMachine
+{
+  (void)virtualMachine;
+  dispatch_semaphore_signal(self.stopped);
+}
+
+- (void)virtualMachine:(VZVirtualMachine *)virtualMachine didStopWithError:(NSError *)error
+{
+  (void)virtualMachine;
+  self.stopError = error;
+  dispatch_semaphore_signal(self.stopped);
+}
+@end
 
 /* ---- Small value constructors ---- */
 
@@ -493,14 +524,17 @@ CAMLprim value vz_virtual_machine_create(value v_config)
   @autoreleasepool {
     VZVirtualMachineConfiguration *config = vz_unwrap(v_config);
     dispatch_queue_t queue = dispatch_queue_create("io.mac_virt.vm", DISPATCH_QUEUE_SERIAL);
+    MacVirtHeadlessDelegate *delegate = [[MacVirtHeadlessDelegate alloc] init];
     __block VZVirtualMachine *vm = nil;
     dispatch_sync(queue, ^{
       vm = [[VZVirtualMachine alloc] initWithConfiguration:config queue:queue];
+      vm.delegate = delegate;
     });
     result = caml_alloc_custom(&vz_vm_ops, sizeof(vz_vm), 0, 1);
     vz_vm *p = Data_custom_val(result);
     p->vm = (void *)CFBridgingRetain(vm);
     p->queue = (void *)CFBridgingRetain(queue);
+    p->delegate = (void *)CFBridgingRetain(delegate);
   }
   CAMLreturn(result);
 }
@@ -516,6 +550,127 @@ CAMLprim value vz_virtual_machine_state(value v_vm)
     state = vm.state;
   });
   CAMLreturn(Val_long((long)state));
+}
+
+/* Run a lifecycle [operation] (start/stop) on the machine's queue and block
+   until its completion handler fires; [can] guards against calling it in a
+   state where the framework would raise. Returns [None] / [Some message]. */
+static value vz_await_vm_lifecycle(vz_vm *p,
+                                   BOOL (^can)(VZVirtualMachine *),
+                                   const char *cannot_message,
+                                   void (^operation)(VZVirtualMachine *, void (^)(NSError *)))
+{
+  VZVirtualMachine *vm = (__bridge VZVirtualMachine *)p->vm;
+  dispatch_queue_t queue = (__bridge dispatch_queue_t)p->queue;
+  __block BOOL allowed = YES;
+  __block NSError *failure = nil;
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  dispatch_async(queue, ^{
+    if (!can(vm)) {
+      allowed = NO;
+      dispatch_semaphore_signal(done);
+    } else {
+      operation(vm, ^(NSError *error) {
+        failure = error;
+        dispatch_semaphore_signal(done);
+      });
+    }
+  });
+  caml_enter_blocking_section();
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+  caml_leave_blocking_section();
+  if (!allowed) return vz_block1(0, caml_copy_string(cannot_message));
+  if (failure != nil) return vz_block1(0, caml_copy_string(failure.localizedDescription.UTF8String));
+  return Val_int(0);
+}
+
+CAMLprim value vz_virtual_machine_start(value v_vm)
+{
+  CAMLparam1(v_vm);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    result = vz_await_vm_lifecycle(
+      Data_custom_val(v_vm),
+      ^BOOL(VZVirtualMachine *vm) { return vm.canStart; },
+      "virtual machine cannot start in its current state",
+      ^(VZVirtualMachine *vm, void (^handler)(NSError *)) {
+        [vm startWithCompletionHandler:handler];
+      });
+  }
+  CAMLreturn(result);
+}
+
+/* Force power-off (equivalent to pulling the plug). */
+CAMLprim value vz_virtual_machine_stop(value v_vm)
+{
+  CAMLparam1(v_vm);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    result = vz_await_vm_lifecycle(
+      Data_custom_val(v_vm),
+      ^BOOL(VZVirtualMachine *vm) { return vm.canStop; },
+      "virtual machine cannot stop in its current state",
+      ^(VZVirtualMachine *vm, void (^handler)(NSError *)) {
+        [vm stopWithCompletionHandler:handler];
+      });
+  }
+  CAMLreturn(result);
+}
+
+/* Ask the guest to shut down cleanly (power-button request). Returns once the
+   request is delivered; the guest stops asynchronously afterwards. */
+CAMLprim value vz_virtual_machine_request_stop(value v_vm)
+{
+  CAMLparam1(v_vm);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    vz_vm *p = Data_custom_val(v_vm);
+    VZVirtualMachine *vm = (__bridge VZVirtualMachine *)p->vm;
+    dispatch_queue_t queue = (__bridge dispatch_queue_t)p->queue;
+    __block BOOL ok = NO;
+    __block NSError *failure = nil;
+    dispatch_sync(queue, ^{
+      if (vm.canRequestStop) ok = [vm requestStopWithError:&failure];
+    });
+    if (ok) {
+      result = Val_int(0);
+    } else {
+      const char *desc = failure.localizedDescription.UTF8String;
+      result = vz_block1(
+        0, caml_copy_string(desc != NULL ? desc : "cannot request guest stop in its current state"));
+    }
+  }
+  CAMLreturn(result);
+}
+
+/* Block until the guest stops on its own (delegate-driven), up to
+   [timeout_seconds] (<= 0 waits forever). Returns the OCaml value
+   [Val_int 0] = stopped cleanly, [Val_int 1] = timed out, or a [Some message]
+   block = stopped with an error. */
+CAMLprim value vz_virtual_machine_wait_for_stop(value v_vm, value v_timeout_seconds)
+{
+  CAMLparam2(v_vm, v_timeout_seconds);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    vz_vm *p = Data_custom_val(v_vm);
+    MacVirtHeadlessDelegate *delegate = (__bridge MacVirtHeadlessDelegate *)p->delegate;
+    long timeout = Long_val(v_timeout_seconds);
+    dispatch_time_t deadline =
+      (timeout <= 0) ? DISPATCH_TIME_FOREVER
+                     : dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout * NSEC_PER_SEC);
+    caml_enter_blocking_section();
+    long timed_out = dispatch_semaphore_wait(delegate.stopped, deadline);
+    caml_leave_blocking_section();
+    if (timed_out != 0) {
+      result = Val_int(1);
+    } else if (delegate.stopError != nil) {
+      result =
+        vz_block1(0, caml_copy_string(delegate.stopError.localizedDescription.UTF8String));
+    } else {
+      result = Val_int(0);
+    }
+  }
+  CAMLreturn(result);
 }
 
 /* ---- Installer ---- */
