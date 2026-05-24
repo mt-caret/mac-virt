@@ -38,6 +38,10 @@ module Auxiliary_storage : sig
 
   (** Create a new auxiliary storage file at [path]. Fails if [path] already exists. *)
   val create : path:string -> hardware_model:Hardware_model.t -> t Or_error.t
+
+  (** Open the existing auxiliary storage at [path], for booting a bundle that was already
+      created. *)
+  val load : path:string -> t
 end
 
 (** The main disk image backing a VM. *)
@@ -160,4 +164,13 @@ module Installer : sig
     :  virtual_machine:Virtual_machine.t
     -> restore_image_path:string
     -> unit Or_error.t
+end
+
+(** Boots a configuration in an on-screen window. *)
+module Gui : sig
+  (** Create and start a virtual machine from [config], show it in a window titled
+      [title], and run the AppKit event loop until the window is closed (which exits the
+      process). Must be called on the program's main thread, and returns only if the
+      configuration is invalid. *)
+  val boot : Configuration.t -> title:string -> unit Or_error.t
 end

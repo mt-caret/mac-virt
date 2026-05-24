@@ -11,4 +11,4 @@
  (action
   (with-stdout-to
    %{target}
-   (run %{exe:main.exe} -help))))
+   (run %{exe:main.exe} help -recursive -flags))))

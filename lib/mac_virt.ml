@@ -32,7 +32,10 @@ module Auxiliary_storage = struct
     -> (t, string) Result.t
     = "vz_auxiliary_storage_create"
 
+  external load_stub : string -> t = "vz_auxiliary_storage_load"
+
   let create ~path ~hardware_model = or_error_of_result (create_stub path hardware_model)
+  let load ~path = load_stub path
 end
 
 module Disk_image = struct
@@ -190,6 +193,18 @@ module Installer = struct
     match install_stub virtual_machine restore_image_path with
     | None -> Ok ()
     | Some message -> Or_error.error_string message
+  ;;
+end
+
+module Gui = struct
+  external boot_stub : Configuration.t -> string -> unit = "vz_boot_gui"
+
+  let boot config ~title =
+    match Configuration.validate config with
+    | Error _ as error -> error
+    | Ok () ->
+      boot_stub config title;
+      Ok ()
   ;;
 end
 

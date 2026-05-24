@@ -10,4 +10,4 @@
   (flags
    (-x objective-c -fobjc-arc)))
  (c_library_flags
-  (-framework Virtualization -framework Foundation)))
+  (-framework Virtualization -framework Foundation -framework AppKit)))

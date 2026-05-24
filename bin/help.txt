@@ -1,18 +1,25 @@
-Build a macOS virtual machine bundle, optionally installing macOS into it
+Create, install, and boot macOS virtual machines
 
-  main.exe 
+  main.exe SUBCOMMAND
 
-=== flags ===
+=== subcommands and flags ===
 
-  -bundle DIR                . directory to hold the VM bundle
-  [-cpu-count N]             . virtual CPUs (default: the image minimum)
-  [-disk-size-gib N]         . main disk size in GiB
-  [-install]                 . install macOS into the bundle (downloads the
-                               latest image if --ipsw is omitted)
-  [-ipsw PATH]               . local restore image (default: fetch the latest
+  boot                       . Boot an installed VM bundle in a window
+  . -bundle DIR              . the VM bundle to boot
+  . [-cpu-count N]           . virtual CPUs (default: 4)
+  . [-memory-gib N]          . RAM in GiB (default: 8)
+  install                    . Create a VM bundle and install macOS into it
+  . -bundle DIR              . directory to hold the VM bundle
+  . [-cpu-count N]           . virtual CPUs (default: the image minimum)
+  . [-disk-size-gib N]       . main disk size in GiB
+  . [-ipsw PATH]             . local restore image (default: download the latest
                                supported)
-  [-memory-gib N]            . RAM in GiB (default: the image minimum)
-  [-build-info]              . print info about this build and exit
-  [-version]                 . print the version of this build and exit
-  [-help], -?                . print this help text and exit
+  . [-memory-gib N]          . RAM in GiB (default: the image minimum)
+  version                    . print version information
+  . [-build-info]            . print build info for this build
+  . [-version]               . print the version of this build
+  help                       . explain a given subcommand (perhaps recursively)
+  . [-expand-dots]           . expand subcommands in recursive help
+  . [-flags]                 . show flags as well in recursive help
+  . [-recursive]             . show subcommands of subcommands, etc.
 

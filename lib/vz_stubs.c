@@ -2,6 +2,7 @@
    Compiled as Objective-C with ARC; see lib/dune for the -x/-fobjc-arc flags
    and the -framework link flags. */
 
+#import <Cocoa/Cocoa.h>
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 
@@ -197,6 +198,18 @@ CAMLprim value vz_auxiliary_storage_create(value v_path, value v_model)
     result = (storage == nil)
                ? vz_error_of_nserror(error, "failed to create auxiliary storage")
                : vz_block1(0, vz_alloc(storage));
+  }
+  CAMLreturn(result);
+}
+
+/* Open the existing auxiliary storage at [v_path] (for booting a bundle). */
+CAMLprim value vz_auxiliary_storage_load(value v_path)
+{
+  CAMLparam1(v_path);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    result = vz_alloc([[VZMacAuxiliaryStorage alloc]
+        initWithURL:[NSURL fileURLWithPath:vz_nsstring(v_path)]]);
   }
   CAMLreturn(result);
 }
@@ -421,6 +434,21 @@ CAMLprim value vz_configuration_create_macos(value v_cpu,
       [devices addObject:vz_unwrap(Field(list, 0))];
     }
     config.storageDevices = devices;
+
+    /* A display, keyboard, and pointing device, so the machine renders to a
+       VZVirtualMachineView and accepts input. Without a graphics device the
+       view stays black even though the guest is running. */
+    VZMacGraphicsDeviceConfiguration *graphics =
+      [[VZMacGraphicsDeviceConfiguration alloc] init];
+    graphics.displays = @[
+      [[VZMacGraphicsDisplayConfiguration alloc] initWithWidthInPixels:1920
+                                                        heightInPixels:1200
+                                                         pixelsPerInch:80]
+    ];
+    config.graphicsDevices = @[ graphics ];
+    config.keyboards = @[ [[VZUSBKeyboardConfiguration alloc] init] ];
+    config.pointingDevices = @[ [[VZUSBScreenCoordinatePointingDeviceConfiguration alloc] init] ];
+
     result = vz_alloc(config);
   }
   CAMLreturn(result);
@@ -531,4 +559,87 @@ CAMLprim value vz_installer_install(value v_vm, value v_ipsw_path)
                : vz_block1(0, caml_copy_string(failure.localizedDescription.UTF8String));
   }
   CAMLreturn(result);
+}
+
+/* ---- GUI boot ---- */
+
+/* Reports unexpected machine stops to stderr and quits the app. */
+@interface MacVirtDelegate : NSObject <VZVirtualMachineDelegate>
+@end
+
+@implementation MacVirtDelegate
+- (void)guestDidStopVirtualMachine:(VZVirtualMachine *)virtualMachine
+{
+  (void)virtualMachine;
+  fprintf(stderr, "Guest stopped the virtual machine.\n");
+  [NSApp terminate:nil];
+}
+
+- (void)virtualMachine:(VZVirtualMachine *)virtualMachine didStopWithError:(NSError *)error
+{
+  (void)virtualMachine;
+  fprintf(stderr, "Virtual machine stopped with error: %s\n", error.localizedDescription.UTF8String);
+  [NSApp terminate:nil];
+}
+@end
+
+/* Create a virtual machine from [v_config] on the main queue, show it in a
+   window, start it, and run the AppKit event loop until the window is closed
+   (which terminates the process). Must be called on the main thread. */
+CAMLprim value vz_boot_gui(value v_config, value v_title)
+{
+  CAMLparam2(v_config, v_title);
+  @autoreleasepool {
+    VZVirtualMachineConfiguration *config = vz_unwrap(v_config);
+    NSString *title = vz_nsstring(v_title);
+
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+    /* No queue argument: the machine is confined to the main queue, which the
+       view and the event loop also run on. */
+    VZVirtualMachine *vm = [[VZVirtualMachine alloc] initWithConfiguration:config];
+    MacVirtDelegate *delegate = [[MacVirtDelegate alloc] init];
+    vm.delegate = delegate;
+
+    VZVirtualMachineView *view =
+      [[VZVirtualMachineView alloc] initWithFrame:NSMakeRect(0, 0, 1280, 800)];
+    view.virtualMachine = vm;
+    view.capturesSystemKeys = YES;
+
+    NSWindow *window = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, 1280, 800)
+                  styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                             | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable)
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    window.title = title;
+    window.contentView = view;
+    [window center];
+    [window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification
+                                                      object:window
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification *note) {
+                                                    (void)note;
+                                                    [NSApp terminate:nil];
+                                                  }];
+
+    [vm startWithCompletionHandler:^(NSError *error) {
+      if (error != nil) {
+        fprintf(stderr, "Failed to start virtual machine: %s\n", error.localizedDescription.UTF8String);
+        [NSApp terminate:nil];
+      } else {
+        fprintf(stderr, "Virtual machine started.\n");
+      }
+    }];
+
+    [NSApp run];
+    /* [NSApp terminate:] exits the process, so this is not reached on a normal
+       window close; keep the delegate alive until here regardless. */
+    (void)delegate;
+  }
+  CAMLreturn(Val_unit);
 }
