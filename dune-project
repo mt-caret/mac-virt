@@ -22,4 +22,5 @@
   (ocaml
    (>= 5.2))
   core
+  core_unix
   ppx_jane))

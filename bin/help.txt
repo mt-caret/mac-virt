@@ -1,0 +1,12 @@
+Create a virtual machine with the given resources and report its state
+
+  main.exe 
+
+=== flags ===
+
+  [-cpu-count N]             . number of virtual CPUs (default: 1)
+  [-memory-gib N]            . amount of RAM in GiB (default: 4)
+  [-build-info]              . print info about this build and exit
+  [-version]                 . print the version of this build and exit
+  [-help], -?                . print this help text and exit
+
