@@ -35,6 +35,18 @@ module Auxiliary_storage = struct
   let create ~path ~hardware_model = or_error_of_result (create_stub path hardware_model)
 end
 
+module Disk_image = struct
+  let create ~path ~size_bytes =
+    Or_error.try_with (fun () ->
+      let fd =
+        Core_unix.openfile path ~mode:Core_unix.[ O_WRONLY; O_CREAT; O_EXCL ] ~perm:0o644
+      in
+      Exn.protect
+        ~f:(fun () -> Core_unix.ftruncate fd ~len:size_bytes)
+        ~finally:(fun () -> Core_unix.close fd))
+  ;;
+end
+
 module Mac_platform = struct
   type t
 
@@ -67,11 +79,30 @@ module Restore_image = struct
     = "vz_restore_image_fetch_latest"
 
   external load_stub : string -> (t, string) Result.t = "vz_restore_image_load"
+  external download_stub : t -> string -> string option = "vz_restore_image_download"
   external url : t -> string = "vz_restore_image_url"
   external requirements : t -> Requirements.t option = "vz_restore_image_requirements"
 
   let fetch_latest () = or_error_of_result (fetch_latest_stub ())
   let load ~path = or_error_of_result (load_stub path)
+
+  let download t ~path =
+    match download_stub t path with
+    | None -> Ok ()
+    | Some message -> Or_error.error_string message
+  ;;
+end
+
+module Storage_device = struct
+  type t
+
+  external disk_image_stub
+    :  string
+    -> bool
+    -> (t, string) Result.t
+    = "vz_storage_device_disk_image"
+
+  let disk_image ~path ~read_only = or_error_of_result (disk_image_stub path read_only)
 end
 
 module Configuration = struct
@@ -83,6 +114,7 @@ module Configuration = struct
     :  int
     -> int64
     -> Mac_platform.t
+    -> Storage_device.t list
     -> t
     = "vz_configuration_create_macos"
 
@@ -92,8 +124,8 @@ module Configuration = struct
 
   let create ~cpu_count ~memory_size = create_stub cpu_count memory_size
 
-  let create_macos ~cpu_count ~memory_size ~platform =
-    create_macos_stub cpu_count memory_size platform
+  let create_macos ~cpu_count ~memory_size ~platform ~storage_devices =
+    create_macos_stub cpu_count memory_size platform storage_devices
   ;;
 
   let validate t =
@@ -147,6 +179,20 @@ module Virtual_machine = struct
   let state t = State.of_int (state_stub t)
 end
 
+module Installer = struct
+  external install_stub
+    :  Virtual_machine.t
+    -> string
+    -> string option
+    = "vz_installer_install"
+
+  let install ~virtual_machine ~restore_image_path =
+    match install_stub virtual_machine restore_image_path with
+    | None -> Ok ()
+    | Some message -> Or_error.error_string message
+  ;;
+end
+
 let%expect_test "virtualization is supported on this host" =
   print_s [%sexp (is_supported () : bool)];
   [%expect {| true |}]
@@ -190,5 +236,35 @@ let%expect_test "hardware model rejects invalid data" =
 let%expect_test "loading a missing restore image fails" =
   print_s
     [%sexp (Result.is_error (Restore_image.load ~path:"/does/not/exist.ipsw") : bool)];
+  [%expect {| true |}]
+;;
+
+let%expect_test "disk image is created at the requested size" =
+  let path = Filename_unix.temp_file "mac_virt" ".img" in
+  Core_unix.unlink path;
+  let size_bytes = Int64.of_int (64 * 1024 * 1024) in
+  let created = Disk_image.create ~path ~size_bytes in
+  let actual_size = (Core_unix.stat path).Core_unix.st_size in
+  Core_unix.unlink path;
+  print_s
+    [%message
+      "" ~created:(Result.is_ok created : bool) (actual_size : int64) (size_bytes : int64)];
+  [%expect {| ((created true) (actual_size 67108864) (size_bytes 67108864)) |}]
+;;
+
+let%expect_test "a storage device can be attached to a disk image" =
+  let path = Filename_unix.temp_file "mac_virt" ".img" in
+  Core_unix.unlink path;
+  let result =
+    let%bind.Or_error () =
+      Disk_image.create ~path ~size_bytes:(Int64.of_int (64 * 1024 * 1024))
+    in
+    let%map.Or_error (_ : Storage_device.t) =
+      Storage_device.disk_image ~path ~read_only:false
+    in
+    ()
+  in
+  Core_unix.unlink path;
+  print_s [%sexp (Result.is_ok result : bool)];
   [%expect {| true |}]
 ;;

@@ -1,11 +1,14 @@
-Assemble and validate a macOS virtual machine configuration
+Build a macOS virtual machine bundle, optionally installing macOS into it
 
   main.exe 
 
 === flags ===
 
-  -aux-storage PATH          . where to create the NVRAM auxiliary storage file
+  -bundle DIR                . directory to hold the VM bundle
   [-cpu-count N]             . virtual CPUs (default: the image minimum)
+  [-disk-size-gib N]         . main disk size in GiB
+  [-install]                 . install macOS into the bundle (downloads the
+                               latest image if --ipsw is omitted)
   [-ipsw PATH]               . local restore image (default: fetch the latest
                                supported)
   [-memory-gib N]            . RAM in GiB (default: the image minimum)

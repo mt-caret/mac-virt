@@ -5,11 +5,14 @@
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 
+#include <stdio.h>
+
 #define CAML_NAME_SPACE
 #include <caml/alloc.h>
 #include <caml/custom.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <caml/threads.h>
 
 /* ---- Wrapping Objective-C objects in OCaml custom blocks ---- */
 
@@ -216,8 +219,8 @@ CAMLprim value vz_mac_platform_create(value v_model, value v_id, value v_storage
 
 /* ---- Restore image ---- */
 
-/* Block until [block] (an asynchronous call taking a (image, error) completion
-   handler) finishes, then return [Ok image] / [Error message]. */
+/* Block until [start]'s (image, error) completion handler fires, then return
+   [Ok image] / [Error message]. */
 static value vz_await_restore_image(void (^start)(void (^)(VZMacOSRestoreImage *, NSError *)))
 {
   __block VZMacOSRestoreImage *image = nil;
@@ -228,7 +231,9 @@ static value vz_await_restore_image(void (^start)(void (^)(VZMacOSRestoreImage *
     failure = err;
     dispatch_semaphore_signal(done);
   });
+  caml_enter_blocking_section();
   dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+  caml_leave_blocking_section();
   return (image == nil) ? vz_error_of_nserror(failure, "failed to load restore image")
                         : vz_block1(0, vz_alloc(image));
 }
@@ -309,6 +314,80 @@ CAMLprim value vz_requirements_minimum_memory_size(value v_requirements)
   CAMLreturn(result);
 }
 
+/* Download the restore image referenced by [v_image] to the file [v_path],
+   overwriting it if present. Blocks until the download completes, printing
+   progress to stderr. Returns [None] on success or [Some message]. */
+CAMLprim value vz_restore_image_download(value v_image, value v_path)
+{
+  CAMLparam2(v_image, v_path);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    NSURL *remote = ((VZMacOSRestoreImage *)vz_unwrap(v_image)).URL;
+    NSURL *destination = [NSURL fileURLWithPath:vz_nsstring(v_path)];
+
+    __block NSError *failure = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession]
+        downloadTaskWithURL:remote
+          completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+            (void)response;
+            if (error != nil) {
+              failure = error;
+            } else {
+              NSFileManager *files = [NSFileManager defaultManager];
+              [files removeItemAtURL:destination error:nil];
+              NSError *move_error = nil;
+              if (![files moveItemAtURL:location toURL:destination error:&move_error]) {
+                failure = move_error;
+              }
+            }
+            dispatch_semaphore_signal(done);
+          }];
+    [task resume];
+
+    caml_enter_blocking_section();
+    while (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) != 0) {
+      int64_t received = task.countOfBytesReceived;
+      int64_t expected = task.countOfBytesExpectedToReceive;
+      fprintf(stderr,
+              "\rDownloading restore image... %.2f / %.2f GB",
+              received / 1e9,
+              expected / 1e9);
+      fflush(stderr);
+    }
+    caml_leave_blocking_section();
+    fprintf(stderr, "\n");
+
+    const char *desc = failure.localizedDescription.UTF8String;
+    result = (failure == nil)
+               ? Val_int(0)
+               : vz_block1(0, caml_copy_string(desc != NULL ? desc : "download failed"));
+  }
+  CAMLreturn(result);
+}
+
+/* ---- Storage device ---- */
+
+CAMLprim value vz_storage_device_disk_image(value v_path, value v_read_only)
+{
+  CAMLparam2(v_path, v_read_only);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    NSError *error = nil;
+    VZDiskImageStorageDeviceAttachment *attachment =
+      [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:[NSURL fileURLWithPath:vz_nsstring(v_path)]
+                                                     readOnly:Bool_val(v_read_only)
+                                                        error:&error];
+    if (attachment == nil) {
+      result = vz_error_of_nserror(error, "failed to attach disk image");
+    } else {
+      result = vz_block1(
+        0, vz_alloc([[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:attachment]));
+    }
+  }
+  CAMLreturn(result);
+}
+
 /* ---- Configuration ---- */
 
 CAMLprim value vz_configuration_create(value v_cpu, value v_mem)
@@ -324,9 +403,12 @@ CAMLprim value vz_configuration_create(value v_cpu, value v_mem)
   CAMLreturn(result);
 }
 
-CAMLprim value vz_configuration_create_macos(value v_cpu, value v_mem, value v_platform)
+CAMLprim value vz_configuration_create_macos(value v_cpu,
+                                             value v_mem,
+                                             value v_platform,
+                                             value v_storage_devices)
 {
-  CAMLparam3(v_cpu, v_mem, v_platform);
+  CAMLparam4(v_cpu, v_mem, v_platform, v_storage_devices);
   CAMLlocal1(result);
   @autoreleasepool {
     VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
@@ -334,6 +416,11 @@ CAMLprim value vz_configuration_create_macos(value v_cpu, value v_mem, value v_p
     config.memorySize = Int64_val(v_mem);
     config.platform = vz_unwrap(v_platform);
     config.bootLoader = [[VZMacOSBootLoader alloc] init];
+    NSMutableArray *devices = [NSMutableArray array];
+    for (value list = v_storage_devices; Is_block(list); list = Field(list, 1)) {
+      [devices addObject:vz_unwrap(Field(list, 0))];
+    }
+    config.storageDevices = devices;
     result = vz_alloc(config);
   }
   CAMLreturn(result);
@@ -401,4 +488,47 @@ CAMLprim value vz_virtual_machine_state(value v_vm)
     state = vm.state;
   });
   CAMLreturn(Val_long((long)state));
+}
+
+/* ---- Installer ---- */
+
+/* Install macOS onto [v_vm]'s storage from the restore image at [v_ipsw_path].
+   The installer is created and driven on the machine's own queue; this thread
+   blocks until installation finishes, printing progress to stderr. Returns
+   [None] on success or [Some message]. */
+CAMLprim value vz_installer_install(value v_vm, value v_ipsw_path)
+{
+  CAMLparam2(v_vm, v_ipsw_path);
+  CAMLlocal1(result);
+  @autoreleasepool {
+    vz_vm *p = Data_custom_val(v_vm);
+    VZVirtualMachine *vm = (__bridge VZVirtualMachine *)p->vm;
+    dispatch_queue_t queue = (__bridge dispatch_queue_t)p->queue;
+    NSURL *ipsw = [NSURL fileURLWithPath:vz_nsstring(v_ipsw_path)];
+
+    __block VZMacOSInstaller *installer = nil;
+    __block NSError *failure = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(queue, ^{
+      installer = [[VZMacOSInstaller alloc] initWithVirtualMachine:vm restoreImageURL:ipsw];
+      [installer installWithCompletionHandler:^(NSError *err) {
+        failure = err;
+        dispatch_semaphore_signal(done);
+      }];
+    });
+
+    caml_enter_blocking_section();
+    while (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) != 0) {
+      double fraction = (installer != nil) ? installer.progress.fractionCompleted : 0.0;
+      fprintf(stderr, "\rInstalling macOS... %5.1f%%", fraction * 100.0);
+      fflush(stderr);
+    }
+    caml_leave_blocking_section();
+    fprintf(stderr, "\rInstalling macOS... done.   \n");
+
+    result = (failure == nil)
+               ? Val_int(0)
+               : vz_block1(0, caml_copy_string(failure.localizedDescription.UTF8String));
+  }
+  CAMLreturn(result);
 }

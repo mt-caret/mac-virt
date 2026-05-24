@@ -1,6 +1,6 @@
 (library
  (name mac_virt)
- (libraries core)
+ (libraries core core_unix core_unix.filename_unix)
  (inline_tests)
  (preprocess
   (pps ppx_jane))
