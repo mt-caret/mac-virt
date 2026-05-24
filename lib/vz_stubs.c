@@ -571,7 +571,7 @@ CAMLprim value vz_installer_install(value v_vm, value v_ipsw_path)
 - (void)guestDidStopVirtualMachine:(VZVirtualMachine *)virtualMachine
 {
   (void)virtualMachine;
-  fprintf(stderr, "Guest stopped the virtual machine.\n");
+  fprintf(stderr, "Guest powered off.\n");
   [NSApp terminate:nil];
 }
 
@@ -619,13 +619,41 @@ CAMLprim value vz_boot_gui(value v_config, value v_title)
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification
-                                                      object:window
-                                                       queue:nil
-                                                  usingBlock:^(NSNotification *note) {
-                                                    (void)note;
-                                                    [NSApp terminate:nil];
-                                                  }];
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSWindowWillCloseNotification
+                    object:window
+                     queue:nil
+                usingBlock:^(NSNotification *note) {
+                  (void)note;
+                  /* Ask the guest to power off cleanly instead of pulling the
+                     plug; the delegate's guestDidStop terminates the process
+                     once it is off. */
+                  NSError *error = nil;
+                  if (vm.canRequestStop && [vm requestStopWithError:&error]) {
+                    fprintf(stderr,
+                            "Requested guest shutdown; waiting for the guest to power "
+                            "off...\n");
+                    /* Safety net: force-quit if the guest never powers off. macOS shows a
+                       shutdown-confirmation dialog that auto-confirms after ~60s, so wait
+                       well past that before pulling the plug. */
+                    dispatch_after(
+                      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(90 * NSEC_PER_SEC)),
+                      dispatch_get_main_queue(),
+                      ^{
+                        if (vm.state != VZVirtualMachineStateStopped) {
+                          fprintf(stderr, "Guest did not power off in time; forcing shutdown.\n");
+                          [NSApp terminate:nil];
+                        }
+                      });
+                  } else {
+                    if (error != nil) {
+                      fprintf(stderr,
+                              "Could not request guest shutdown: %s\n",
+                              error.localizedDescription.UTF8String);
+                    }
+                    [NSApp terminate:nil];
+                  }
+                }];
 
     [vm startWithCompletionHandler:^(NSError *error) {
       if (error != nil) {
