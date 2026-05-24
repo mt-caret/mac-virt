@@ -1,11 +1,14 @@
-Create a virtual machine with the given resources and report its state
+Assemble and validate a macOS virtual machine configuration
 
   main.exe 
 
 === flags ===
 
-  [-cpu-count N]             . number of virtual CPUs (default: 1)
-  [-memory-gib N]            . amount of RAM in GiB (default: 4)
+  -aux-storage PATH          . where to create the NVRAM auxiliary storage file
+  [-cpu-count N]             . virtual CPUs (default: the image minimum)
+  [-ipsw PATH]               . local restore image (default: fetch the latest
+                               supported)
+  [-memory-gib N]            . RAM in GiB (default: the image minimum)
   [-build-info]              . print info about this build and exit
   [-version]                 . print the version of this build and exit
   [-help], -?                . print this help text and exit
