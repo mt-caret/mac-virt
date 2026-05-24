@@ -1,0 +1,13 @@
+(library
+ (name mac_virt)
+ (libraries core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane))
+ (foreign_stubs
+  (language c)
+  (names vz_stubs)
+  (flags
+   (-x objective-c -fobjc-arc)))
+ (c_library_flags
+  (-framework Virtualization -framework Foundation)))

@@ -1,0 +1,6 @@
+(executable
+ (public_name mac-virt)
+ (name main)
+ (libraries core mac_virt)
+ (preprocess
+  (pps ppx_jane)))
